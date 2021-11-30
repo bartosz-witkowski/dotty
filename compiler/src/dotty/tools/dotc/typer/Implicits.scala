@@ -306,6 +306,10 @@ object Implicits:
       isImport: Boolean)(initctx: Context) extends ImplicitRefs(initctx) {
     private val eligibleCache = EqHashMap[Type, List[Candidate]]()
 
+    private[Implicits] def useGivenFullContext(context: Context): ContextualImplicits = {
+      new ContextualImplicits(refs, outerImplicits, isImport)(context)
+    }
+
     /** The level increases if current context has a different owner or scope than
      *  the context of the next-outer ImplicitRefs. This is however disabled under
      *  Scala2 mode, since we do not want to change the implicit disambiguation then.
@@ -1439,13 +1443,22 @@ trait Implicits:
       case _ =>
         tp.isAny || tp.isAnyRef
 
-    private def searchImplicit(contextual: Boolean): SearchResult =
+    private def searchImplicit(contextual: Boolean, useFullCurrentContext: Boolean): SearchResult =
       if isUnderspecified(wildProto) then
         NoMatchingImplicitsFailure
       else
         val eligible =
-          if contextual then ctx.implicits.eligible(wildProto)
-          else implicitScope(wildProto).eligible
+          if (contextual) {
+            val implicits = {
+              val i = ctx.implicits
+              if (useFullCurrentContext && i.outerImplicits != null) {
+                i.useGivenFullContext(ctx)
+              } else {
+                i
+              }
+            }
+            implicits.eligible(wildProto)
+          } else implicitScope(wildProto).eligible
         searchImplicit(eligible, contextual) match
           case result: SearchSuccess =>
             result
@@ -1454,14 +1467,19 @@ trait Implicits:
               case _: AmbiguousImplicits => failure
               case reason =>
                 if contextual then
-                  searchImplicit(contextual = false).recoverWith {
-                    failure2 => failure2.reason match
-                      case _: AmbiguousImplicits => failure2
-                      case _ =>
-                        reason match
-                          case (_: DivergingImplicit) => failure
-                          case _ => List(failure, failure2).maxBy(_.tree.treeSize)
-                  }
+                  if useFullCurrentContext then
+                    failure
+                  else
+                    searchImplicit(contextual = true, useFullCurrentContext = true).recoverWith { _ =>
+                      searchImplicit(contextual = false, useFullCurrentContext = false).recoverWith {
+                        failure2 => failure2.reason match
+                          case _: AmbiguousImplicits => failure2
+                          case _ =>
+                            reason match
+                              case (_: DivergingImplicit) => failure
+                              case _ => List(failure, failure2).maxBy(_.tree.treeSize)
+                      }
+                    }
                 else failure
     end searchImplicit
 
@@ -1479,7 +1497,7 @@ trait Implicits:
         case ref: TermRef =>
           SearchSuccess(tpd.ref(ref).withSpan(span.startPos), ref, 0)(ctx.typerState, ctx.gadt)
         case _ =>
-          searchImplicit(contextual = true)
+          searchImplicit(contextual = true, useFullCurrentContext = false)
     end bestImplicit
 
     def implicitScope(tp: Type): OfTypeImplicits = ctx.run.implicitScope(tp)
